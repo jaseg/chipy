@@ -140,6 +140,18 @@ class ChipyContext:
             self.snippet = self.parent.snippet
         tls.ChipyCurrentContext = self
 
+    @contextmanager
+    def block(self, begin, end='end'):
+        self.pushctx()
+        self.add_line(begin)
+        self.add_indent()
+
+        yield self
+
+        self.remove_indent()
+        self.add_line(end)
+        self.popctx()
+
     # Context manager protocol for ChipyContext object
     def __enter__(self):
         self.pushctx()
@@ -1108,16 +1120,10 @@ def Sig(arg, width=None):
 @contextmanager
 def If(cond):
     tls.ChipyElseContext = None
-    with ChipyContext() as ctx:
-        cond.set_materialize()
-        ctx.add_line("if (%s) begin // %s" % (cond.name, ChipyCodeLoc()))
-        ctx.add_indent()
-
+    cond.set_materialize()
+    with ChipyContext().block("if (%s) begin // %s" % (cond.name, ChipyCodeLoc())) as ctx:
         yield
-
         tls.ChipyElseContext = ctx
-        ctx.remove_indent()
-        ctx.add_line("end")
 
 
 @contextmanager
@@ -1125,16 +1131,10 @@ def ElseIf(cond):
     cond = Sig(cond)
 
     tls.ChipyElseContext = None
-    with tls.ChipyElseContext as ctx:
-        cond.set_materialize()
-        ctx.add_line("else if (%s) begin // %s" % (cond.name, ChipyCodeLoc()))
-        ctx.add_indent()
-
+    cond.set_materialize()
+    with tls.ChipyElseContext.block("else if (%s) begin // %s" % (cond.name, ChipyCodeLoc())) as ctx:
         yield
-
         tls.ChipyElseContext = ctx
-        ctx.remove_indent()
-        ctx.add_line("end")
 
 
 @contextmanager
@@ -1156,51 +1156,35 @@ def Switch(expr, parallel=False, full=False):
     expr = Sig(expr)
 
     tls.ChipyElseContext = None
-    with ChipyContext() as ctx:
-        expr.set_materialize()
-        if parallel:
-            ctx.add_line("(* parallel_case *)")
-        if full:
-            ctx.add_line("(* full_case *)")
-        ctx.add_line("case (%s) // %s" % (expr.name, ChipyCodeLoc()))
-        ctx.add_indent()
-
+    ctx = ChipyContext()
+    expr.set_materialize()
+    if parallel:
+        ctx.add_line("(* parallel_case *)")
+    if full:
+        ctx.add_line("(* full_case *)")
+    with ctx.block(
+            begin="case (%s) // %s" % (expr.name, ChipyCodeLoc()),
+            end='endcase'):
         yield
-
         tls.ChipyElseContext = None
-        ctx.remove_indent()
-        ctx.add_line("endcase")
 
 
 @contextmanager
 def Case(expr):
     expr = Sig(expr)
-
+    expr.set_materialize()
     tls.ChipyElseContext = None
-    with ChipyContext() as ctx:
-        expr.set_materialize()
-        ctx.add_line("%s: begin // %s" % (expr.name, ChipyCodeLoc()))
-        ctx.add_indent()
-
+    with ChipyContext().block("%s: begin // %s" % (expr.name, ChipyCodeLoc())) as ctx:
         yield
-
         tls.ChipyElseContext = None
-        ctx.remove_indent()
-        ctx.add_line("end")
 
 
 @contextmanager
 def Default():
     tls.ChipyElseContext = None
-    with ChipyContext() as ctx:
-        ctx.add_line("default: begin // %s" % ChipyCodeLoc())
-        ctx.add_indent()
-
+    with ChipyContext().block("default: begin // %s" % ChipyCodeLoc()) as ctx:
         yield
-
         tls.ChipyElseContext = None
-        ctx.remove_indent()
-        ctx.add_line("end")
 
 
 def Stream(data_type, last=False, destbits=0):

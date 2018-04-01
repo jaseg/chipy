@@ -11,7 +11,7 @@ with AddModule("gate_1"):
 
     with If(submode):
         out.next = a - b
-    with Else:
+    with Else():
         out.next = a + b
 
 
@@ -25,7 +25,7 @@ with AddModule("gate_2"):
 
     with If(submode):
         out.next = a - b
-    with Else:
+    with Else():
         out.next = a + b
 
 
@@ -39,7 +39,7 @@ with AddModule("gate_3"):
 
     with If(submode):
         Assign(Sig("out"), Sig("a") - Sig("b"))
-    with Else:
+    with Else():
         Assign(Sig("out"), Sig("a") + Sig("b"))
 
 

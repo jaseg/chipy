@@ -29,7 +29,7 @@ with AddModule("gate_1"):
         with Case(17): y.next = a.reduce_xor()
         with Case(18): y.next = a.logic()
         with Case(19): y.next = Repeat(4, a[b[2:0]])
-        with Default: y.next = 0
+        with Default(): y.next = 0
 
 
 with open("test007.v", "w") as f:

@@ -13,12 +13,12 @@ with AddModule("gate_1"):
     with If(concat_mode):
         with If(reverse_order):
             out.next = Concat([b[15:0], a[15:0]])
-        with Else:
+        with Else():
             out.next = Concat([a[15:0], b[15:0]])
-    with Else:
+    with Else():
         with If(reverse_order):
             out.next = b - a
-        with Else:
+        with Else():
             out.next = a - b
 
 
@@ -34,13 +34,13 @@ with AddModule("gate_2"):
     with If(reverse_order):
         aa.next = b
         bb.next = a
-    with Else:
+    with Else():
         aa.next = a
         bb.next = b
 
     with If(concat_mode):
         out.next = Concat([aa[15:0], bb[15:0]])
-    with Else:
+    with Else():
         out.next = aa - bb
 
 
