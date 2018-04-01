@@ -37,7 +37,7 @@ with AddModule("gate_1"):
 with AddModule("gate_2"):
     ports = AddPort("", Module("gate_1").intf(), "child")
     inst = AddInst("inst", Module("gate_1"))
-    Connect([ports, inst])
+    Connect(ports, inst)
 
 
 with open("test002.v", "w") as f:
