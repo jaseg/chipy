@@ -19,20 +19,40 @@
 
 import traceback
 import os.path
+import threading
 
 
-ChipyModulesDict = dict()
-ChipyCurrentContext = None
-ChipyElseContext = None
-ChipyIdCounter = 0
+class TLSDefaults:
+    def __init__(self, **defaults):
+        # Use self.__dict__ to circumvent __setattr__ below.
+        self.__dict__['_defaults'] = defaults
+        self.__dict__['_tls'] = threading.local()
+        # NOTE: We cannot initialize the attributes of self._tls from defaults
+        # here as __init__ may be called on a different thread than __getattr__
+
+    def __getattr__(self, name):
+        # In case this is the first access to {name} on this thread and name is
+        # in _defaults, initialize it in _tls.
+        if name in self._defaults and not hasattr(self._tls, name):
+            setattr(self._tls, name, self._defaults[name])
+        return getattr(self._tls, name)
+
+    def __setattr__(self, name, value):
+        setattr(self._tls, name, value)
+
+
+tls = TLSDefaults(
+        ChipyModulesDict={},
+        ChipyCurrentContext=None,
+        ChipyElseContext=None,
+        ChipyIdCounter=0)
 
 
 def ResetDesign():
-    global ChipyModulesDict, ChipyIdCounter, ChipyElseContext
-    assert ChipyCurrentContext is None
-    ChipyModulesDict = dict()
-    ChipyElseContext = None
-    ChipyIdCounter = 0
+    assert tls.ChipyCurrentContext is None
+    tls.ChipyModulesDict = dict()
+    tls.ChipyElseContext = None
+    tls.ChipyIdCounter = 0
 
 
 def ChipyError(message):
@@ -53,19 +73,18 @@ def ChipySameModule(modules):
         assert reference is mod
 
     if reference is None:
-        assert ChipyCurrentContext is not None
-        return ChipyCurrentContext.module
+        assert tls.ChipyCurrentContext is not None
+        return tls.ChipyCurrentContext.module
 
-    if ChipyCurrentContext is not None:
-        assert ChipyCurrentContext.module is reference
+    if tls.ChipyCurrentContext is not None:
+        assert tls.ChipyCurrentContext.module is reference
 
     return reference
 
 
 def ChipyAutoName():
-    global ChipyIdCounter
-    ChipyIdCounter += 1
-    return "__%d" % ChipyIdCounter
+    tls.ChipyIdCounter += 1
+    return "__%d" % tls.ChipyIdCounter
 
 
 def ChipyCodeLoc():
@@ -83,9 +102,8 @@ def ChipyCodeLoc():
 
 class ChipyContext:
     def __init__(self, newmod=None):
-        global ChipyCurrentContext
-        self.parent = ChipyCurrentContext
-        ChipyCurrentContext = self
+        self.parent = tls.ChipyCurrentContext
+        tls.ChipyCurrentContext = self
 
         if newmod is None:
             self.module = self.parent.module
@@ -112,15 +130,13 @@ class ChipyContext:
         self.snippet.indent_str = self.snippet.indent_str[2:]
 
     def popctx(self):
-        global ChipyCurrentContext
-        ChipyCurrentContext = self.parent
+        tls.ChipyCurrentContext = self.parent
         self.parent = None
 
     def pushctx(self):
-        global ChipyCurrentContext
         assert self.parent is None
-        self.parent = ChipyCurrentContext
-        ChipyCurrentContext = self
+        self.parent = tls.ChipyCurrentContext
+        tls.ChipyCurrentContext = self
 
 
 class ChipySnippet:
@@ -142,8 +158,8 @@ class ChipyModule:
         self.init_snippets = list()
         self.code_snippets = list()
 
-        assert name not in ChipyModulesDict
-        ChipyModulesDict[name] = self
+        assert name not in tls.ChipyModulesDict
+        tls.ChipyModulesDict[name] = self
 
     def intf(self, prefix=""):
         def callback(addport, role):
@@ -281,7 +297,7 @@ class ChipyModule:
         ChipyContext(newmod=self)
 
     def __exit__(self, type, value, traceback):
-        ChipyCurrentContext.popctx()
+        tls.ChipyCurrentContext.popctx()
 
 
 def ChipyUnaryOp(vlogop, a, signprop=True, logicout=False):
@@ -693,10 +709,10 @@ def Zip(bundles, recursive=False):
 
 def Module(name=None):
     if name is None:
-        assert ChipyCurrentContext is not None
-        return ChipyCurrentContext.module
-    if name in ChipyModulesDict:
-        return ChipyModulesDict[name]
+        assert tls.ChipyCurrentContext is not None
+        return tls.ChipyCurrentContext.module
+    if name in tls.ChipyModulesDict:
+        return tls.ChipyModulesDict[name]
     return None
 
 
@@ -714,8 +730,8 @@ def AddInput(name, type=1):
     if not isinstance(type, int):
         return AddPort(name, type, "input")
 
-    assert ChipyCurrentContext is not None
-    module = ChipyCurrentContext.module
+    assert tls.ChipyCurrentContext is not None
+    module = tls.ChipyCurrentContext.module
 
     signal = ChipySignal(module, name)
     signal.width = abs(type)
@@ -735,8 +751,8 @@ def AddOutput(name, type=1, posedge=None, negedge=None, nodefault=False, async=F
     if not isinstance(type, int):
         return AddPort(name, type, "output", posedge=posedge, negedge=negedge, nodefault=nodefault, async=async)
 
-    assert ChipyCurrentContext is not None
-    module = ChipyCurrentContext.module
+    assert tls.ChipyCurrentContext is not None
+    module = tls.ChipyCurrentContext.module
 
     signal = ChipySignal(module, name)
     signal.width = abs(type)
@@ -794,8 +810,8 @@ def AddReg(name, type=1, posedge=None, negedge=None, nodefault=False, async=None
     if not isinstance(type, int):
         return AddPort(name, type, "register", posedge=posedge, negedge=negedge, nodefault=nodefault, async=async)
 
-    assert ChipyCurrentContext is not None
-    module = ChipyCurrentContext.module
+    assert tls.ChipyCurrentContext is not None
+    module = tls.ChipyCurrentContext.module
 
     signal = ChipySignal(module, name)
     signal.width = abs(type)
@@ -820,8 +836,8 @@ def AddMemory(name, type, depth, posedge=None, negedge=None):
     assert len(names) == 1
     name = names[0]
 
-    assert ChipyCurrentContext is not None
-    module = ChipyCurrentContext.module
+    assert tls.ChipyCurrentContext is not None
+    module = tls.ChipyCurrentContext.module
 
     if isinstance(type, int):
         return ChipyMemory(module, abs(type), depth, name, posedge=posedge, negedge=negedge, signed=(type < 0))
@@ -891,8 +907,8 @@ def AddInst(name, type):
     assert len(names) == 1
     name = names[0]
 
-    assert ChipyCurrentContext is not None
-    module = ChipyCurrentContext.module
+    assert tls.ChipyCurrentContext is not None
+    module = tls.ChipyCurrentContext.module
 
     bundle = AddPort(name, type.intf(), "parent")
     for signal in bundle.values():
@@ -923,8 +939,8 @@ def Concat(sigs):
     lvalues = list()
     deps = dict()
 
-    if ChipyCurrentContext is not None:
-        module = ChipyCurrentContext.module
+    if tls.ChipyCurrentContext is not None:
+        module = tls.ChipyCurrentContext.module
 
     for sig in sigs:
         sig = Sig(sig)
@@ -959,8 +975,8 @@ def Concat(sigs):
 def Repeat(num, sig):
     sig = Sig(sig)
 
-    if ChipyCurrentContext is not None:
-        module = ChipyCurrentContext.module
+    if tls.ChipyCurrentContext is not None:
+        module = tls.ChipyCurrentContext.module
 
     signal = ChipySignal(module)
     signal.width = num * sig.width
@@ -996,8 +1012,8 @@ def Connect(sigs):
 
     assert master_sig is not None
 
-    assert ChipyCurrentContext is not None
-    module = ChipyCurrentContext.module
+    assert tls.ChipyCurrentContext is not None
+    module = tls.ChipyCurrentContext.module
 
     for sig in slave_sigs:
         module.regactions.append("  assign %s = %s; // %s" % (sig.name, master_sig.name, ChipyCodeLoc()))
@@ -1033,8 +1049,8 @@ def Assign(lhs, rhs):
         module.init_snippets.append(snippet)
 
         ChipyContext()
-        ChipyCurrentContext.add_line("%s = 1'b1; // %s" % (wen.name, ChipyCodeLoc()), wen.get_deps())
-        ChipyCurrentContext.popctx()
+        tls.ChipyCurrentContext.add_line("%s = 1'b1; // %s" % (wen.name, ChipyCodeLoc()), wen.get_deps())
+        tls.ChipyCurrentContext.popctx()
 
         lhs.memory.regactions.append("if (%s) %s <= %s; // %s" % (wen.name, lhs.vlog_rvalue, rhs.name, ChipyCodeLoc()))
 
@@ -1047,9 +1063,9 @@ def Assign(lhs, rhs):
     for lhs_dep in lhs_deps.values():
         lhs_dep.gotassign = True
 
-    ChipyCurrentContext.add_line("%s = %s; // %s" % (lhs.vlog_lvalue, rhs.name, ChipyCodeLoc()), lhs_deps)
+    tls.ChipyCurrentContext.add_line("%s = %s; // %s" % (lhs.vlog_lvalue, rhs.name, ChipyCodeLoc()), lhs_deps)
 
-    ChipyCurrentContext.popctx()
+    tls.ChipyCurrentContext.popctx()
 
 
 def Sig(arg, width=None):
@@ -1070,8 +1086,8 @@ def Sig(arg, width=None):
 
     if isinstance(arg, str):
         assert width is None
-        assert arg in ChipyCurrentContext.module.signals
-        return ChipyCurrentContext.module.signals[arg]
+        assert arg in tls.ChipyCurrentContext.module.signals
+        return tls.ChipyCurrentContext.module.signals[arg]
 
     if isinstance(arg, int):
         if width is None: width=-32
@@ -1088,21 +1104,19 @@ class If:
         self.cond = cond
 
     def __enter__(self):
-        global ChipyElseContext
-        ChipyElseContext = None
+        tls.ChipyElseContext = None
 
         ChipyContext()
         self.cond.set_materialize()
-        ChipyCurrentContext.add_line("if (%s) begin // %s" % (self.cond.name, ChipyCodeLoc()))
-        ChipyCurrentContext.add_indent()
+        tls.ChipyCurrentContext.add_line("if (%s) begin // %s" % (self.cond.name, ChipyCodeLoc()))
+        tls.ChipyCurrentContext.add_indent()
 
     def __exit__(self, type, value, traceback):
-        global ChipyElseContext
-        ChipyElseContext = ChipyCurrentContext
+        tls.ChipyElseContext = tls.ChipyCurrentContext
 
-        ChipyCurrentContext.remove_indent()
-        ChipyCurrentContext.add_line("end")
-        ChipyCurrentContext.popctx()
+        tls.ChipyCurrentContext.remove_indent()
+        tls.ChipyCurrentContext.add_line("end")
+        tls.ChipyCurrentContext.popctx()
 
 
 class ElseIf:
@@ -1110,21 +1124,19 @@ class ElseIf:
         self.cond = Sig(cond)
 
     def __enter__(self):
-        global ChipyElseContext
-        ChipyElseContext = None
+        tls.ChipyElseContext = None
 
-        ChipyElseContext.pushctx()
+        tls.ChipyElseContext.pushctx()
         self.cond.set_materialize()
-        ChipyCurrentContext.add_line("else if (%s) begin // %s" % (self.cond.name, ChipyCodeLoc()))
-        ChipyCurrentContext.add_indent()
+        tls.ChipyCurrentContext.add_line("else if (%s) begin // %s" % (self.cond.name, ChipyCodeLoc()))
+        tls.ChipyCurrentContext.add_indent()
 
     def __exit__(self, type, value, traceback):
-        global ChipyElseContext
-        ChipyElseContext = ChipyCurrentContext
+        tls.ChipyElseContext = tls.ChipyCurrentContext
 
-        ChipyCurrentContext.remove_indent()
-        ChipyCurrentContext.add_line("end")
-        ChipyCurrentContext.popctx()
+        tls.ChipyCurrentContext.remove_indent()
+        tls.ChipyCurrentContext.add_line("end")
+        tls.ChipyCurrentContext.popctx()
 
 
 class Else:
@@ -1132,19 +1144,18 @@ class Else:
         pass
 
     def __enter__(self):
-        assert ChipyElseContext is not None
+        assert tls.ChipyElseContext is not None
 
-        ChipyElseContext.pushctx()
-        ChipyCurrentContext.add_line("else begin // %s" % ChipyCodeLoc())
-        ChipyCurrentContext.add_indent()
+        tls.ChipyElseContext.pushctx()
+        tls.ChipyCurrentContext.add_line("else begin // %s" % ChipyCodeLoc())
+        tls.ChipyCurrentContext.add_indent()
 
     def __exit__(self, type, value, traceback):
-        global ChipyElseContext
-        ChipyElseContext = ChipyCurrentContext
+        tls.ChipyElseContext = tls.ChipyCurrentContext
 
-        ChipyCurrentContext.remove_indent()
-        ChipyCurrentContext.add_line("end")
-        ChipyCurrentContext.popctx()
+        tls.ChipyCurrentContext.remove_indent()
+        tls.ChipyCurrentContext.add_line("end")
+        tls.ChipyCurrentContext.popctx()
 
 Else = Else()
 
@@ -1156,25 +1167,23 @@ class Switch:
         self.full = full
 
     def __enter__(self):
-        global ChipyElseContext
-        ChipyElseContext = None
+        tls.ChipyElseContext = None
 
         ChipyContext()
         self.expr.set_materialize()
         if self.parallel:
-            ChipyCurrentContext.add_line("(* parallel_case *)")
+            tls.ChipyCurrentContext.add_line("(* parallel_case *)")
         if self.full:
-            ChipyCurrentContext.add_line("(* full_case *)")
-        ChipyCurrentContext.add_line("case (%s) // %s" % (self.expr.name, ChipyCodeLoc()))
-        ChipyCurrentContext.add_indent()
+            tls.ChipyCurrentContext.add_line("(* full_case *)")
+        tls.ChipyCurrentContext.add_line("case (%s) // %s" % (self.expr.name, ChipyCodeLoc()))
+        tls.ChipyCurrentContext.add_indent()
 
     def __exit__(self, type, value, traceback):
-        global ChipyElseContext
-        ChipyElseContext = None
+        tls.ChipyElseContext = None
 
-        ChipyCurrentContext.remove_indent()
-        ChipyCurrentContext.add_line("endcase")
-        ChipyCurrentContext.popctx()
+        tls.ChipyCurrentContext.remove_indent()
+        tls.ChipyCurrentContext.add_line("endcase")
+        tls.ChipyCurrentContext.popctx()
 
 
 class Case:
@@ -1182,21 +1191,19 @@ class Case:
         self.expr = Sig(expr)
 
     def __enter__(self):
-        global ChipyElseContext
-        ChipyElseContext = None
+        tls.ChipyElseContext = None
 
         ChipyContext()
         self.expr.set_materialize()
-        ChipyCurrentContext.add_line("%s: begin // %s" % (self.expr.name, ChipyCodeLoc()))
-        ChipyCurrentContext.add_indent()
+        tls.ChipyCurrentContext.add_line("%s: begin // %s" % (self.expr.name, ChipyCodeLoc()))
+        tls.ChipyCurrentContext.add_indent()
 
     def __exit__(self, type, value, traceback):
-        global ChipyElseContext
-        ChipyElseContext = None
+        tls.ChipyElseContext = None
 
-        ChipyCurrentContext.remove_indent()
-        ChipyCurrentContext.add_line("end")
-        ChipyCurrentContext.popctx()
+        tls.ChipyCurrentContext.remove_indent()
+        tls.ChipyCurrentContext.add_line("end")
+        tls.ChipyCurrentContext.popctx()
 
 
 class Default:
@@ -1204,20 +1211,18 @@ class Default:
         pass
 
     def __enter__(self):
-        global ChipyElseContext
-        ChipyElseContext = None
+        tls.ChipyElseContext = None
 
         ChipyContext()
-        ChipyCurrentContext.add_line("default: begin // %s" % ChipyCodeLoc())
-        ChipyCurrentContext.add_indent()
+        tls.ChipyCurrentContext.add_line("default: begin // %s" % ChipyCodeLoc())
+        tls.ChipyCurrentContext.add_indent()
 
     def __exit__(self, type, value, traceback):
-        global ChipyElseContext
-        ChipyElseContext = None
+        tls.ChipyElseContext = None
 
-        ChipyCurrentContext.remove_indent()
-        ChipyCurrentContext.add_line("end")
-        ChipyCurrentContext.popctx()
+        tls.ChipyCurrentContext.remove_indent()
+        tls.ChipyCurrentContext.add_line("end")
+        tls.ChipyCurrentContext.popctx()
 
 Default = Default()
 
@@ -1236,5 +1241,5 @@ def Stream(data_type, last=False, destbits=0):
 
 def WriteVerilog(f):
     print("// Generated using Chipy (Constructing Hardware In PYthon)", file=f)
-    for modname, module in ChipyModulesDict.items():
+    for modname, module in tls.ChipyModulesDict.items():
         module.write_verilog(f)
