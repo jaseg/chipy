@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from Chipy import *
+from chipy.Chipy import *
 
 
 def rgbdata(addport, role):
