@@ -20,6 +20,7 @@
 import traceback
 import os.path
 import threading
+from contextlib import contextmanager
 
 
 class TLSDefaults:
@@ -103,18 +104,11 @@ def ChipyCodeLoc():
 
 class ChipyContext:
     def __init__(self, newmod=None):
-        self.parent = tls.ChipyCurrentContext
-        tls.ChipyCurrentContext = self
-
-        if newmod is None:
-            self.module = self.parent.module
-            self.snippet = self.parent.snippet
-
-        else:
-            self.module = newmod
-            self.snippet = None
+        self.module = newmod
+        self.snippet = None
 
     def add_line(self, line, lvalues=None):
+        assert getattr(self, 'parent') is not None
         if self.snippet is None:
             self.snippet = ChipySnippet()
             self.module.code_snippets.append(self.snippet)
@@ -125,9 +119,11 @@ class ChipyContext:
         self.snippet.text_lines.append(self.snippet.indent_str + line)
 
     def add_indent(self):
+        assert getattr(self, 'parent') is not None
         self.snippet.indent_str += "  "
 
     def remove_indent(self):
+        assert getattr(self, 'parent') is not None
         self.snippet.indent_str = self.snippet.indent_str[2:]
 
     def popctx(self):
@@ -135,9 +131,35 @@ class ChipyContext:
         self.parent = None
 
     def pushctx(self):
-        assert self.parent is None
+        # If we'd "assert" for "not hasattr(self, 'parent')" here instead we
+        # would prevent several subsequent blocks with the same context, which
+        # we need for If/Else which both happen in the same context.
+        assert getattr(self, 'parent', None) is None
         self.parent = tls.ChipyCurrentContext
+        if self.module is None:
+            self.module = self.parent.module
+            self.snippet = self.parent.snippet
         tls.ChipyCurrentContext = self
+
+    @contextmanager
+    def block(self, begin, end='end'):
+        self.pushctx()
+        self.add_line(begin)
+        self.add_indent()
+
+        yield self
+
+        self.remove_indent()
+        self.add_line(end)
+        self.popctx()
+
+    # Context manager protocol for ChipyContext object
+    def __enter__(self):
+        self.pushctx()
+        return self
+
+    def __exit__(self, type, value, traceback):
+        self.popctx()
 
 
 class ChipySnippet:
@@ -333,7 +355,7 @@ class ChipyModule:
         print("endmodule", file=f)
 
     def __enter__(self):
-        ChipyContext(newmod=self)
+        ChipyContext(newmod=self).pushctx()
 
     def __exit__(self, type, value, traceback):
         tls.ChipyCurrentContext.popctx()
@@ -1137,10 +1159,9 @@ def Assign(lhs, rhs):
         snippet.lvalue_signals[wen.name] = wen
         module.init_snippets.append(snippet)
 
-        ChipyContext()
-        tls.ChipyCurrentContext.add_line("%s = 1'b1; // %s"
-                                     % (wen.name, ChipyCodeLoc()), wen.get_deps())
-        tls.ChipyCurrentContext.popctx()
+        with ChipyContext() as ctx:
+            ctx.add_line("%s = 1'b1; // %s"
+                    % (wen.name, ChipyCodeLoc()), wen.get_deps())
 
         lhs.memory.regactions.append("if (%s) %s <= %s; // %s"
                                      % (wen.name, lhs.vlog_rvalue, rhs.name,
@@ -1148,16 +1169,14 @@ def Assign(lhs, rhs):
 
         return
 
-    assert lhs.vlog_lvalue is not None
-    ChipyContext()
+    with ChipyContext() as ctx:
+        assert lhs.vlog_lvalue is not None
+        lhs_deps = lhs.get_deps()
+        for lhs_dep in lhs_deps.values():
+            lhs_dep.gotassign = True
 
-    lhs_deps = lhs.get_deps()
-    for lhs_dep in lhs_deps.values():
-        lhs_dep.gotassign = True
-
-    tls.ChipyCurrentContext.add_line("%s = %s; // %s" % (lhs.vlog_lvalue, rhs.name,
-                                                     ChipyCodeLoc()), lhs_deps)
-    tls.ChipyCurrentContext.popctx()
+        ctx.add_line("%s = %s; // %s"
+                % (lhs.vlog_lvalue, rhs.name, ChipyCodeLoc()), lhs_deps)
 
 
 def Sig(arg, width=None):
@@ -1193,136 +1212,76 @@ def Sig(arg, width=None):
     assert 0
 
 
-class If:
-    def __init__(self, cond):
-        self.cond = cond
+@contextmanager
+def If(cond):
+    tls.ChipyElseContext = None
+    cond.set_materialize()
+    with ChipyContext().block("if (%s) begin // %s"
+            % (cond.name, ChipyCodeLoc())) as ctx:
+        yield
+        tls.ChipyElseContext = ctx
 
-    def __enter__(self):
+
+@contextmanager
+def ElseIf(cond):
+    cond = Sig(cond)
+
+    tls.ChipyElseContext = None
+    cond.set_materialize()
+    with tls.ChipyElseContext.block("else if (%s) begin // %s"
+            % (cond.name, ChipyCodeLoc())) as ctx:
+        yield
+        tls.ChipyElseContext = ctx
+
+
+@contextmanager
+def Else():
+    assert tls.ChipyElseContext is not None
+    with tls.ChipyElseContext as ctx:
+        ctx.add_line("else begin // %s" % ChipyCodeLoc())
+        ctx.add_indent()
+
+        yield
+
+        tls.ChipyElseContext = ctx
+        ctx.remove_indent()
+        ctx.add_line("end")
+
+
+@contextmanager
+def Switch(expr, parallel=False, full=False):
+    expr = Sig(expr)
+
+    tls.ChipyElseContext = None
+    ctx = ChipyContext()
+    expr.set_materialize()
+    if parallel:
+        ctx.add_line("(* parallel_case *)")
+    if full:
+        ctx.add_line("(* full_case *)")
+    with ctx.block(
+            begin="case (%s) // %s" % (expr.name, ChipyCodeLoc()),
+            end='endcase'):
+        yield
         tls.ChipyElseContext = None
 
-        ChipyContext()
-        self.cond.set_materialize()
-        tls.ChipyCurrentContext.add_line("if (%s) begin // %s"
-                                     % (self.cond.name, ChipyCodeLoc()))
-        tls.ChipyCurrentContext.add_indent()
 
-    def __exit__(self, type, value, traceback):
-        tls.ChipyElseContext = tls.ChipyCurrentContext
-
-        tls.ChipyCurrentContext.remove_indent()
-        tls.ChipyCurrentContext.add_line("end")
-        tls.ChipyCurrentContext.popctx()
-
-
-class ElseIf:
-    def __init__(self, cond):
-        self.cond = Sig(cond)
-
-    def __enter__(self):
+@contextmanager
+def Case(expr):
+    expr = Sig(expr)
+    expr.set_materialize()
+    tls.ChipyElseContext = None
+    with ChipyContext().block("%s: begin // %s" % (expr.name, ChipyCodeLoc())) as ctx:
+        yield
         tls.ChipyElseContext = None
 
-        tls.ChipyElseContext.pushctx()
-        self.cond.set_materialize()
-        tls.ChipyCurrentContext.add_line("else if (%s) begin // %s"
-                                     % (self.cond.name, ChipyCodeLoc()))
-        tls.ChipyCurrentContext.add_indent()
 
-    def __exit__(self, type, value, traceback):
-        tls.ChipyElseContext = tls.ChipyCurrentContext
-
-        tls.ChipyCurrentContext.remove_indent()
-        tls.ChipyCurrentContext.add_line("end")
-        tls.ChipyCurrentContext.popctx()
-
-
-class Else:
-    def __init__(self):
-        pass
-
-    def __enter__(self):
-        assert tls.ChipyElseContext is not None
-
-        tls.ChipyElseContext.pushctx()
-        tls.ChipyCurrentContext.add_line("else begin // %s" % ChipyCodeLoc())
-        tls.ChipyCurrentContext.add_indent()
-
-    def __exit__(self, type, value, traceback):
-        tls.ChipyElseContext = tls.ChipyCurrentContext
-
-        tls.ChipyCurrentContext.remove_indent()
-        tls.ChipyCurrentContext.add_line("end")
-        tls.ChipyCurrentContext.popctx()
-
-Else = Else()
-
-
-class Switch:
-    def __init__(self, expr, parallel=False, full=False):
-        self.expr = Sig(expr)
-        self.parallel = parallel
-        self.full = full
-
-    def __enter__(self):
+@contextmanager
+def Default():
+    tls.ChipyElseContext = None
+    with ChipyContext().block("default: begin // %s" % ChipyCodeLoc()) as ctx:
+        yield
         tls.ChipyElseContext = None
-
-        ChipyContext()
-        self.expr.set_materialize()
-        if self.parallel:
-            tls.ChipyCurrentContext.add_line("(* parallel_case *)")
-        if self.full:
-            tls.ChipyCurrentContext.add_line("(* full_case *)")
-        tls.ChipyCurrentContext.add_line("case (%s) // %s"
-                % (self.expr.name, ChipyCodeLoc()))
-        tls.ChipyCurrentContext.add_indent()
-
-    def __exit__(self, type, value, traceback):
-        tls.ChipyElseContext = None
-
-        tls.ChipyCurrentContext.remove_indent()
-        tls.ChipyCurrentContext.add_line("endcase")
-        tls.ChipyCurrentContext.popctx()
-
-
-class Case:
-    def __init__(self, expr):
-        self.expr = Sig(expr)
-
-    def __enter__(self):
-        tls.ChipyElseContext = None
-
-        ChipyContext()
-        self.expr.set_materialize()
-        tls.ChipyCurrentContext.add_line("%s: begin // %s"
-                                     % (self.expr.name, ChipyCodeLoc()))
-        tls.ChipyCurrentContext.add_indent()
-
-    def __exit__(self, type, value, traceback):
-        tls.ChipyElseContext = None
-
-        tls.ChipyCurrentContext.remove_indent()
-        tls.ChipyCurrentContext.add_line("end")
-        tls.ChipyCurrentContext.popctx()
-
-
-class Default:
-    def __init__(self):
-        pass
-
-    def __enter__(self):
-        tls.ChipyElseContext = None
-
-        ChipyContext()
-        tls.ChipyCurrentContext.add_line("default: begin // %s" % ChipyCodeLoc())
-        tls.ChipyCurrentContext.add_indent()
-
-    def __exit__(self, type, value, traceback):
-        tls.ChipyElseContext = None
-
-        tls.ChipyCurrentContext.remove_indent()
-        tls.ChipyCurrentContext.add_line("end")
-        tls.ChipyCurrentContext.popctx()
-
-Default = Default()
 
 
 def Stream(data_type, last=False, destbits=0):
