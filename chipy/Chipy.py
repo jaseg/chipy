@@ -50,37 +50,30 @@ tls = TLSDefaults(
 
 
 def ResetDesign():
-    assert tls.ChipyCurrentContext is None
+    if tls.ChipyCurrentContext is not None:
+        raise ValueError(
+                'Cannot reset design inside open context (If/Else/Switch etc. block).')
     tls.ChipyModulesDict = dict()
     tls.ChipyElseContext = None
     tls.ChipyIdCounter = 0
 
 
-def ChipyError(message):
-    print()
-    print("----------------------------")
-    print(message)
-    print("----------------------------")
-    print()
-    assert 0
+class ChipyError(ValueError):
+    pass
 
+
+def raiseOutsideContext(name):
+    if tls.ChipyCurrentContext is None:
+        raise ChipyError('{} called outside chipy context'.format(name))
 
 def ChipySameModule(modules):
-    reference = None
+    raiseOutsideContext('ChipySameModule')
+    mods = {tls.ChipyCurrentContext.module, *modules} - {None}
 
-    for mod in modules:
-        if mod is None: continue
-        if reference is None: reference = mod
-        assert reference is mod
+    if len(mods) != 1:
+        raise ValueError('Modules are none or not the same.')
 
-    if reference is None:
-        assert tls.ChipyCurrentContext is not None
-        return tls.ChipyCurrentContext.module
-
-    if tls.ChipyCurrentContext is not None:
-        assert tls.ChipyCurrentContext.module is reference
-
-    return reference
+    return mods.pop()
 
 
 def ChipyAutoName():
@@ -107,7 +100,8 @@ class ChipyContext:
         self.snippet = None
 
     def add_line(self, line, lvalues=None):
-        assert getattr(self, 'parent') is not None
+        if getattr(self, 'parent') is None:
+            raise ValueError('Trying to add line to closed context.')
         if self.snippet is None:
             self.snippet = ChipySnippet()
             self.module.code_snippets.append(self.snippet)
@@ -118,11 +112,13 @@ class ChipyContext:
         self.snippet.text_lines.append(self.snippet.indent_str + line)
 
     def add_indent(self):
-        assert getattr(self, 'parent') is not None
+        if getattr(self, 'parent') is None:
+            raise ValueError('Trying to add indent to closed context.')
         self.snippet.indent_str += "  "
 
     def remove_indent(self):
-        assert getattr(self, 'parent') is not None
+        if getattr(self, 'parent') is None:
+            raise ValueError('Trying to remove indent from closed context.')
         self.snippet.indent_str = self.snippet.indent_str[2:]
 
     def popctx(self):
@@ -130,10 +126,11 @@ class ChipyContext:
         self.parent = None
 
     def pushctx(self):
-        # If we'd "assert" for "not hasattr(self, 'parent')" here instead we
-        # would prevent several subsequent blocks with the same context, which
-        # we need for If/Else which both happen in the same context.
-        assert getattr(self, 'parent', None) is None
+        # If we'd check for "not hasattr(self, 'parent')" here instead we would
+        # prevent several subsequent blocks with the same context, which we
+        # need for If/Else which both happen in the same context.
+        if getattr(self, 'parent', None) is not None:
+            raise ValueError('Trying to enter context that is already open.')
         self.parent = tls.ChipyCurrentContext
         if self.module is None:
             self.module = self.parent.module
@@ -180,7 +177,8 @@ class ChipyModule:
         self.init_snippets = list()
         self.code_snippets = list()
 
-        assert name not in tls.ChipyModulesDict
+        if name in tls.ChipyModulesDict:
+            raise ChipyError('Module name {} already in use'.format(name))
         tls.ChipyModulesDict[name] = self
 
     def intf(self, prefix=""):
@@ -233,9 +231,9 @@ class ChipyModule:
                     assignlist.append("  assign %s = %s; // %s" % (signal.name, signal.vlog_rvalue, signal.codeloc))
             if signal.register:
                 if not signal.gotassign:
-                    ChipyError("Register without assignment: %s.%s" % (signal.module.name, signal.name))
+                    raise ChipyError("Register without assignment: %s.%s" % (signal.module.name, signal.name))
                 if not signal.regaction:
-                    ChipyError("Register without synchronization element: %s.%s" % (signal.module.name, signal.name))
+                    raise ChipyError("Register without synchronization element: %s.%s" % (signal.module.name, signal.name))
                 if signal.width > 1:
                     wirelist.append("  reg [%d:0] %s; // %s" % (signal.width-1, signal.vlog_lvalue, signal.codeloc))
                 else:
@@ -397,7 +395,9 @@ class ChipySignal:
         self.deps = dict()
 
         if not const:
-            assert name not in module.signals
+            if name in module.signals:
+                raise ChipyError(
+                        'Signal name {} already in use in module {}'.format(name, module.name))
             module.signals[name] = self
 
     def get_deps(self):
@@ -428,8 +428,11 @@ class ChipySignal:
 
         if isinstance(index, tuple):
             index, width = index
-            assert not isinstance(index, slice)
-            assert isinstance(width, int)
+            if isinstance(index, slice):
+                raise TypeError(
+                    'Trying to index signal {} with tuple containing slice'.format(self.name))
+            if not isinstance(width, int):
+                raise TypeError('Second tuple element in Signal index must be "width" int')
 
             updown = "+" if width >= 0 else "-"
             width = abs(width)
@@ -445,7 +448,8 @@ class ChipySignal:
             elif isinstance(index, int):
                 index = "%d" % index
             else:
-                assert 0
+                raise TypeError(
+                    'Trying to index signal with object of type {}'.format(type(index)))
 
             signal.vlog_rvalue = "%s[%s %c: %d]" % (self_name, index, updown, width)
             if self.vlog_lvalue is not None:
@@ -492,7 +496,8 @@ class ChipySignal:
 
             return signal
 
-        assert 0
+        raise NotImplementedError(
+                'Indexing with object of type {} not implemented'.format(type(index)))
 
     def __neg__(self):
         return ChipyUnaryOp("-", self)
@@ -602,7 +607,8 @@ class ChipyMemory:
         if name is None:
             name = ChipyAutoName()
 
-        assert (posedge is None) != (negedge is None)
+        if (posedge is None) == (negedge is None):
+            raise ValueError('posedge XOR negedge must be given')
 
         self.name = name
         self.module = module
@@ -614,7 +620,8 @@ class ChipyMemory:
         self.signed = signed
         self.regactions = list()
 
-        assert name not in module.memories
+        if name in module.memories:
+            raise ChipyError('Memory name {} already in use'.format(name))
         module.memories[name] = self
 
     def __getitem__(self, index):
@@ -662,7 +669,6 @@ class ChipyBundle:
         return self.members.items()
 
     def get(self, name):
-        assert name in self.members
         return self.members[name]
 
     def __getitem__(self, index):
@@ -731,7 +737,8 @@ def Zip(bundles, recursive=False):
 
 def Module(name=None):
     if name is None:
-        assert tls.ChipyCurrentContext is not None
+        if tls.ChipyCurrentContext is None:
+            raise ChipyError('Top-level modules must be named')
         return tls.ChipyCurrentContext.module
     if name in tls.ChipyModulesDict:
         return tls.ChipyModulesDict[name]
@@ -743,6 +750,8 @@ def AddModule(name):
 
 
 def AddInput(name, type=1):
+    raiseOutsideContext('AddInput')
+
     names = name.split()
     if len(names) > 1:
         return [AddInput(n, type) for n in names]
@@ -752,7 +761,6 @@ def AddInput(name, type=1):
     if not isinstance(type, int):
         return AddPort(name, type, "input")
 
-    assert tls.ChipyCurrentContext is not None
     module = tls.ChipyCurrentContext.module
 
     signal = ChipySignal(module, name)
@@ -764,6 +772,8 @@ def AddInput(name, type=1):
 
 
 def AddOutput(name, type=1, posedge=None, negedge=None, nodefault=False, async=False):
+    raiseOutsideContext('AddOutput')
+
     names = name.split()
     if len(names) > 1:
         return [AddOutput(n, type, posedge, negedge, nodefault, async) for n in names]
@@ -773,7 +783,6 @@ def AddOutput(name, type=1, posedge=None, negedge=None, nodefault=False, async=F
     if not isinstance(type, int):
         return AddPort(name, type, "output", posedge=posedge, negedge=negedge, nodefault=nodefault, async=async)
 
-    assert tls.ChipyCurrentContext is not None
     module = tls.ChipyCurrentContext.module
 
     signal = ChipySignal(module, name)
@@ -823,6 +832,8 @@ def AddPort(name, type, role, posedge=None, negedge=None, nodefault=False, async
 
 
 def AddReg(name, type=1, posedge=None, negedge=None, nodefault=False, async=None):
+    raiseOutsideContext('AddReg')
+
     names = name.split()
     if len(names) > 1:
         return [AddReg(n, type, posedge, negedge, nodefault, async) for n in names]
@@ -832,7 +843,6 @@ def AddReg(name, type=1, posedge=None, negedge=None, nodefault=False, async=None
     if not isinstance(type, int):
         return AddPort(name, type, "register", posedge=posedge, negedge=negedge, nodefault=nodefault, async=async)
 
-    assert tls.ChipyCurrentContext is not None
     module = tls.ChipyCurrentContext.module
 
     signal = ChipySignal(module, name)
@@ -852,13 +862,14 @@ def AddReg(name, type=1, posedge=None, negedge=None, nodefault=False, async=None
 
 
 def AddMemory(name, type, depth, posedge=None, negedge=None):
+    raiseOutsideContext('AddMemory')
+
     names = name.split()
     if len(names) > 1:
         return [AddMemory(n, type, depth, posedge, negedge) for n in names]
     assert len(names) == 1
     name = names[0]
 
-    assert tls.ChipyCurrentContext is not None
     module = tls.ChipyCurrentContext.module
 
     if isinstance(type, int):
@@ -880,8 +891,10 @@ def AddFF(signal, posedge=None, negedge=None, nodefault=False):
             AddFF(member, posedge=posedge, negedge=negedge, nodefault=nodefault)
         return
 
-    assert signal.register and not signal.regaction
-    num_actions = 0
+    if not signal.register:
+        raise ChipyError('AddFF called on non-register signal')
+    if signal.regaction:
+        raise ChipyError('AddFF called on register with regaction already set')
 
     snippet = ChipySnippet()
     if nodefault:
@@ -891,17 +904,17 @@ def AddFF(signal, posedge=None, negedge=None, nodefault=False):
     snippet.lvalue_signals[signal.name] = signal
     signal.module.init_snippets.append(snippet)
 
+    if (posedge is None) == (negedge is None):
+        raise ValueError('posedge XOR negedge must be given')
+
     if posedge is not None:
         signal.module.regactions.append("  always @(posedge %s) %s <= %s; // %s" % (posedge.name, signal.name, signal.vlog_lvalue, ChipyCodeLoc()))
         signal.vlog_reg = True
-        num_actions += 1
 
     if negedge is not None:
         signal.module.regactions.append("  always @(negedge %s) %s <= %s; // %s" % (posedge.name, signal.name, signal.vlog_lvalue, ChipyCodeLoc()))
         signal.vlog_reg = True
-        num_actions += 1
 
-    assert num_actions == 1
     signal.regaction = True
 
 
@@ -911,7 +924,10 @@ def AddAsync(signal):
             AddAsync(member)
         return
 
-    assert signal.register and not signal.regaction
+    if not signal.register:
+        raise ChipyError('AddAsync called on non-register signal')
+    if signal.regaction:
+        raise ChipyError('AddAsync called on register with regaction already set')
 
     snippet = ChipySnippet()
     snippet.text_lines.append(snippet.indent_str + "%s = %d'bx; // %s" % (signal.vlog_lvalue, signal.width, ChipyCodeLoc()))
@@ -923,13 +939,14 @@ def AddAsync(signal):
 
 
 def AddInst(name, type):
+    raiseOutsideContext('AddInst')
+
     names = name.split()
     if len(names) > 1:
         return [AddInst(n, type) for n in names]
     assert len(names) == 1
     name = names[0]
 
-    assert tls.ChipyCurrentContext is not None
     module = tls.ChipyCurrentContext.module
 
     bundle = AddPort(name, type.intf(), "parent")
@@ -970,7 +987,9 @@ def Concat(sigs):
         if module is None:
             module = sig.module
         elif sig.module is not None:
-            assert module is sig.module
+            if module is not sig.module:
+                raise ChipyError('Trying to Concat signals across module boundaries: {} is in module {} which is not module {}'.format(
+                    sig.name, sig.module.name, module.name))
 
         if sig.vlog_lvalue is None:
             lvalues = None
@@ -982,7 +1001,9 @@ def Concat(sigs):
         rvalues.append(sig.name)
         deps[sig.name] = sig
 
-    assert module is not None
+    if module is None:
+        raise ChipyError('Cannot infer module in Concat. Make sure this is either called from within a module context '
+                'or one of the concatenated signals is from within a module.')
 
     signal = ChipySignal(module)
     signal.width = width
@@ -1008,33 +1029,32 @@ def Repeat(num, sig):
     return signal
 
 
-def Connect(sigs):
-    if len(sigs) < 2:
-        return
+def Connect(first, second, *rest):
+    raiseOutsideContext('Connect')
 
-    if isinstance(sigs[0], ChipyBundle):
+    sigs = [first, second, *rest]
+
+    if isinstance(first, ChipyBundle):
         for sig in sigs:
-            assert isinstance(sig, ChipyBundle)
-        for member in sigs[0].keys():
-            newsigs = list()
-            for sig in sigs:
-                newsigs.append(sig.get(member))
-            Connect(newsigs)
+            if not isinstance(sig, ChipyBundle):
+                raise ValueError('Can only connect bundles with other bundles')
+        for member in first.keys():
+            Connect(*[sig.get(member) for sig in sigs])
         return
 
-    master_sig = None
-    slave_sigs = list()
+    checkreg = lambda sig: not sig.register or sig.regaction or sig.gotassign
+    masters = list(filter(checkreg, sigs))
+    # Note that you can't just use something like "sig in sigs" since ChipySignal overloads __eq__.
+    slave_sigs = list(filter(lambda s: not checkreg(s), sigs))
 
-    for sig in sigs:
-        if not sig.register or sig.regaction or sig.gotassign:
-            assert master_sig is None
-            master_sig = sig
-        else:
-            slave_sigs.append(sig)
+    if len(masters) == 0:
+        raise ChipyError('Could not identify a master signal in Connect statement')
+    if len(masters) > 1:
+        raise ChipyError('Multiple possible masters in Connect statement: {}'.format(
+            ','.join(sig.name for sig in masters)))
 
-    assert master_sig is not None
+    master_sig, = masters
 
-    assert tls.ChipyCurrentContext is not None
     module = tls.ChipyCurrentContext.module
 
     for sig in slave_sigs:
@@ -1048,7 +1068,8 @@ def Connect(sigs):
 
 def Assign(lhs, rhs):
     if isinstance(lhs, ChipyBundle):
-        assert isinstance(rhs, ChipyBundle)
+        if not isinstance(rhs, ChipyBundle):
+            raise ValueError('Can only assign bundles with other bundles')
         for member in lhs.members.keys():
             Assign(lhs.get(member), rhs.get(member))
         return
@@ -1078,7 +1099,8 @@ def Assign(lhs, rhs):
         return
 
     with ChipyContext() as ctx:
-        assert lhs.vlog_lvalue is not None
+        if lhs.vlog_lvalue is None:
+            raise ValueError('Trying to assign to signal with unset lvalue')
         lhs_deps = lhs.get_deps()
         for lhs_dep in lhs_deps.values():
             lhs_dep.gotassign = True
@@ -1099,12 +1121,16 @@ def Sig(arg, width=None):
         return arg
 
     if isinstance(arg, (tuple, list)):
-        assert width is None
+        if width is not None:
+            raise ValueError('When constructing Sig from tuple or list, width must not be given')
         return Concat(arg)
 
     if isinstance(arg, str):
-        assert width is None
-        assert arg in tls.ChipyCurrentContext.module.signals
+        if width is not None:
+            raise ValueError('When constructing Sig from name, width must not be given')
+        if arg not in tls.ChipyCurrentContext.module.signals:
+            raise ChipyError('Signal {} not found in current module ({})'.format(
+                arg, tls.ChipyCurrentContext.module.name))
         return tls.ChipyCurrentContext.module.signals[arg]
 
     if isinstance(arg, int):
@@ -1114,7 +1140,7 @@ def Sig(arg, width=None):
         signal.width = abs(width)
         return signal
 
-    assert 0
+    raise TypeError('Cannot construct Sig from object of type {}'.format(type(arg)))
 
 
 @contextmanager
@@ -1139,7 +1165,8 @@ def ElseIf(cond):
 
 @contextmanager
 def Else():
-    assert tls.ChipyElseContext is not None
+    if tls.ChipyElseContext is None:
+        raise ChipyError('Cannot find matching If/IfElse for Else')
     with tls.ChipyElseContext as ctx:
         ctx.add_line("else begin // %s" % ChipyCodeLoc())
         ctx.add_indent()
